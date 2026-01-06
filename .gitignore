@@ -1,0 +1,17 @@
+# Binaries
+server
+*.exe
+*.dll
+
+# Frontend
+frontend/node_modules
+frontend/dist
+frontend/.env
+frontend/.env.local
+
+# Go
+vendor/
+
+# GeoIP Database (download from maxmind.com)
+data/*.mmdb
+*.tar.gz
