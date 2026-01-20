@@ -1,0 +1,5 @@
+{"time":"2026-01-23T04:47:55.845004858Z","level":"INFO","msg":"Server starting","port":"5432"}
+{"time":"2026-01-23T04:48:20.473259936Z","level":"INFO","msg":"Analyzing pcap","targetIP":"192.168.1.5","size":176}
+{"time":"2026-01-23T04:48:20.651727446Z","level":"WARN","msg":"GeoIP lookup failed","ip":"192.168.1.1","error":"API returned status: 401 Unauthorized"}
+{"time":"2026-01-23T04:48:46.248708762Z","level":"INFO","msg":"Server shutting down..."}
+{"time":"2026-01-23T04:48:46.248965779Z","level":"INFO","msg":"Server exited"}
