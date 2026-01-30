@@ -1,9 +1,10 @@
-// Package analyzer provides PCAP file parsing and traffic analysis functionality.
+// Package analyzer provides PCAP file parsing and TCP traffic analysis functionality.
 //
 // This package supports both traditional PCAP and modern PCAPNG file formats,
 // automatically detecting the format based on the file's magic bytes. It analyzes
-// network traffic relative to a specified target IP address, categorizing packets
+// TCP network traffic relative to a specified target IP address, categorizing packets
 // as either "sent" (originating from target) or "received" (destined to target).
+// Non-TCP packets (UDP, ICMP, etc.) are automatically filtered out.
 //
 // # Supported Formats
 //
@@ -12,9 +13,9 @@
 //
 // # Supported Protocols
 //
+//   - TCP only: Analyzes TCP packets over both IPv4 and IPv6
 //   - IPv4: Full support for source/destination IP extraction
 //   - IPv6: Full support for source/destination IP extraction
-//   - TCP/UDP: Port information available via packet layers (not extracted in analysis)
 //
 // # Usage Example
 //
@@ -28,7 +29,7 @@
 //	    log.Fatal(err)
 //	}
 //
-//	fmt.Printf("Sent %d packets to %d unique IPs\n",
+//	fmt.Printf("Sent %d TCP packets to %d unique IPs\n",
 //	    len(result.SentTime), len(result.SentIP))
 package analyzer
 
@@ -115,19 +116,19 @@ func mergeResults(dest, src *AnalysisResult) {
 // PCAPNG files begin with a Section Header Block (SHB) which starts with 0x0A0D0D0A.
 var pcapngMagic = []byte{0x0A, 0x0D, 0x0D, 0x0A}
 
-// Analyze parses a PCAP or PCAPNG file and returns traffic analysis relative to targetIP.
+// Analyze parses a PCAP or PCAPNG file and returns TCP traffic analysis relative to targetIP.
 //
 // This function automatically detects the file format (PCAP vs PCAPNG) based on
-// magic bytes and processes all IP packets in the capture using parallel workers.
+// magic bytes and processes all TCP packets in the capture using parallel workers.
 // Packets are categorized as "sent" or "received" based on whether the source or
-// destination IP matches the target.
+// destination IP matches the target. Non-TCP packets (UDP, ICMP, etc.) are filtered out.
 //
 // Parameters:
 //   - content: The complete PCAP/PCAPNG file contents as a byte slice.
 //   - targetIP: The IP address to analyze traffic for (e.g., "192.168.1.100").
 //
 // Returns:
-//   - *AnalysisResult: Aggregated traffic statistics, or nil on error.
+//   - *AnalysisResult: Aggregated TCP traffic statistics, or nil on error.
 //   - error: Non-nil if the file cannot be parsed or the target IP is invalid.
 //
 // Format Detection:
@@ -135,10 +136,10 @@ var pcapngMagic = []byte{0x0A, 0x0D, 0x0D, 0x0A}
 //   - All other files are assumed to be PCAP format. Invalid PCAP files will
 //     return an error from the reader initialization.
 //
-// Non-IP Packets:
+// Packet Filtering:
 //
-//	Packets without an IPv4 or IPv6 layer (e.g., ARP, raw Ethernet) are silently
-//	skipped and not included in the analysis.
+//	Only TCP packets are analyzed. Non-TCP packets (UDP, ICMP, ARP, etc.) are
+//	silently skipped and not included in the analysis.
 //
 // Note: For PCAPNG files, this function assumes Ethernet link type. PCAP files
 // use the link type specified in their file header.
@@ -244,19 +245,26 @@ func Analyze(content []byte, targetIP string) (*AnalysisResult, error) {
 	return mainResult, nil
 }
 
-// extractIPAddresses extracts source and destination IP addresses from a packet.
+// extractIPAddresses extracts source and destination IP addresses from a TCP packet.
 //
 // This helper function checks for both IPv4 and IPv6 layers and returns the
 // source and destination addresses. It supports mixed IPv4/IPv6 captures.
+// Only TCP packets are processed; all other protocols are filtered out.
 //
 // Parameters:
 //   - packet: The gopacket.Packet to extract addresses from.
 //
 // Returns:
-//   - srcIP: Source IP address, or nil if not an IP packet.
-//   - dstIP: Destination IP address, or nil if not an IP packet.
-//   - ok: True if IP addresses were successfully extracted.
+//   - srcIP: Source IP address, or nil if not a TCP packet.
+//   - dstIP: Destination IP address, or nil if not a TCP packet.
+//   - ok: True if IP addresses were successfully extracted from a TCP packet.
 func extractIPAddresses(packet gopacket.Packet) (srcIP, dstIP net.IP, ok bool) {
+	// Filter: Only process TCP packets
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer == nil {
+		// Not a TCP packet, skip it
+		return nil, nil, false
+	}
+
 	// Try IPv4 first (more common)
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv4)
@@ -269,6 +277,6 @@ func extractIPAddresses(packet gopacket.Packet) (srcIP, dstIP net.IP, ok bool) {
 		return ip.SrcIP, ip.DstIP, true
 	}
 
-	// Not an IP packet
+	// Has TCP layer but no IP layer (shouldn't happen in practice)
 	return nil, nil, false
 }
