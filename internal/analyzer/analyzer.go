@@ -36,7 +36,8 @@ import (
 	"bytes"
 	"fmt"
 	"net"
-	"time"
+	"runtime"
+	"sync"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -90,6 +91,26 @@ func NewAnalysisResult() *AnalysisResult {
 	}
 }
 
+// mergeResults merges the source AnalysisResult into the destination.
+// This is used in the reduce phase to combine partial results from workers.
+func mergeResults(dest, src *AnalysisResult) {
+	for k, v := range src.SentTime {
+		dest.SentTime[k] += v
+	}
+	for k, v := range src.ReceivedTime {
+		dest.ReceivedTime[k] += v
+	}
+	for k, v := range src.SentIP {
+		dest.SentIP[k] += v
+	}
+	for k, v := range src.ReceivedIP {
+		dest.ReceivedIP[k] += v
+	}
+	for k, v := range src.SentSize {
+		dest.SentSize[k] += v
+	}
+}
+
 // pcapngMagic is the magic byte sequence identifying PCAPNG format files.
 // PCAPNG files begin with a Section Header Block (SHB) which starts with 0x0A0D0D0A.
 var pcapngMagic = []byte{0x0A, 0x0D, 0x0D, 0x0A}
@@ -97,9 +118,9 @@ var pcapngMagic = []byte{0x0A, 0x0D, 0x0D, 0x0A}
 // Analyze parses a PCAP or PCAPNG file and returns traffic analysis relative to targetIP.
 //
 // This function automatically detects the file format (PCAP vs PCAPNG) based on
-// magic bytes and processes all IP packets in the capture. Packets are categorized
-// as "sent" or "received" based on whether the source or destination IP matches
-// the target.
+// magic bytes and processes all IP packets in the capture using parallel workers.
+// Packets are categorized as "sent" or "received" based on whether the source or
+// destination IP matches the target.
 //
 // Parameters:
 //   - content: The complete PCAP/PCAPNG file contents as a byte slice.
@@ -150,48 +171,77 @@ func Analyze(content []byte, targetIP string) (*AnalysisResult, error) {
 		packetSource = gopacket.NewPacketSource(pcapReader, pcapReader.LinkType())
 	}
 
-	result := NewAnalysisResult()
-
-	var startTime time.Time
-	firstPacket := true
-
 	// Parse and validate target IP address
 	targetIPNet := net.ParseIP(targetIP)
 	if targetIPNet == nil {
 		return nil, fmt.Errorf("invalid target IP: %s", targetIP)
 	}
 
-	// TODO: consider parallelizing with worker pool for large captures
-	for packet := range packetSource.Packets() {
-		// Extract source and destination IPs from IPv4 or IPv6 layer
+	// Get packet channel from source
+	packets := packetSource.Packets()
+
+	// Read first packet to establish startTime
+	firstPkt, ok := <-packets
+	if !ok {
+		// Empty capture file
+		return NewAnalysisResult(), nil
+	}
+	startTime := firstPkt.Metadata().Timestamp
+
+	// Set up worker pool (Map-Reduce pattern)
+	numWorkers := runtime.NumCPU()
+	var wg sync.WaitGroup
+	resultsChan := make(chan *AnalysisResult, numWorkers)
+
+	// processPacket is the core logic each worker applies
+	processPacket := func(packet gopacket.Packet, result *AnalysisResult) {
 		srcIP, dstIP, ok := extractIPAddresses(packet)
 		if !ok {
-			continue // Skip non-IP packets (e.g., ARP)
+			return
 		}
 
-		// Initialize start time from first packet for relative timestamps
-		if firstPacket {
-			startTime = packet.Metadata().Timestamp
-			firstPacket = false
-		}
-
-		// Calculate relative time in seconds
 		relativeTime := int(packet.Metadata().Timestamp.Sub(startTime).Seconds())
 
-		// Categorize packet as sent or received based on target IP
 		if srcIP.Equal(targetIPNet) {
-			// Packet sent FROM target IP
 			result.SentTime[relativeTime]++
 			result.SentSize[relativeTime] += len(packet.Data())
 			result.SentIP[dstIP.String()]++
 		} else if dstIP.Equal(targetIPNet) {
-			// Packet sent TO target IP
 			result.ReceivedTime[relativeTime]++
 			result.ReceivedIP[srcIP.String()]++
 		}
 	}
 
-	return result, nil
+	// Start workers - they read directly from the packets channel
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			localResult := NewAnalysisResult()
+
+			for packet := range packets {
+				processPacket(packet, localResult)
+			}
+
+			resultsChan <- localResult
+		}()
+	}
+
+	// Process the first packet in the main goroutine's result
+	// (we already consumed it, so workers won't see it)
+	mainResult := NewAnalysisResult()
+	processPacket(firstPkt, mainResult)
+
+	// Wait for all workers to finish
+	wg.Wait()
+	close(resultsChan)
+
+	// Reduce phase: merge all partial results into mainResult
+	for partialResult := range resultsChan {
+		mergeResults(mainResult, partialResult)
+	}
+
+	return mainResult, nil
 }
 
 // extractIPAddresses extracts source and destination IP addresses from a packet.

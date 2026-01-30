@@ -1,7 +1,11 @@
 # Binaries
 server
+pcap-analyzer
 *.exe
 *.dll
+
+# Logs
+*.log
 
 # Frontend
 frontend/node_modules

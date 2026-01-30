@@ -27,8 +27,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Eissayou/pcap-analyzer/pkg/analyzer"
-	"github.com/Eissayou/pcap-analyzer/pkg/geoip"
+	"github.com/Eissayou/pcap-analyzer/internal/analyzer"
+	"github.com/Eissayou/pcap-analyzer/internal/geoip"
 )
 
 const (

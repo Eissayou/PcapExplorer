@@ -199,26 +199,3 @@ func (r *Reader) GetLocation(ipStr string) (*Location, error) {
 
 	return loc, nil
 }
-
-// =============================================================================
-// Legacy API Client (kept for backwards compatibility)
-// =============================================================================
-
-// Client is a legacy client for the MaxMind GeoIP2 web service API.
-//
-// Deprecated: Use Reader with the local GeoLite2 database instead.
-// The local database is free, faster, and doesn't require API credentials.
-type Client struct {
-	AccountID  string
-	LicenseKey string
-}
-
-// NewClient creates a new MaxMind API client.
-//
-// Deprecated: Use NewReader with the local GeoLite2 database instead.
-func NewClient(accountID, licenseKey string) *Client {
-	return &Client{
-		AccountID:  accountID,
-		LicenseKey: licenseKey,
-	}
-}
