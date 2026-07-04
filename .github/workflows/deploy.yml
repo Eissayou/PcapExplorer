@@ -1,9 +1,11 @@
 name: Deploy to Azure Container Apps
 
-# Deploys on every push to main, or manually via the Actions tab.
+# Manual-only: trigger from the Actions tab (Run workflow). Auto-deploy on push
+# is intentionally disabled because it requires repo secrets that aren't set
+# (MAXMIND_LICENSE_KEY + AZURE_* OIDC). Day-to-day deploys use ./deploy-azure.sh
+# locally, which needs no secrets. To re-enable push-to-deploy, add those four
+# secrets (see DEPLOY.md) and restore the `push:` trigger below.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 # OIDC login to Azure needs id-token: write. No long-lived secrets stored.
