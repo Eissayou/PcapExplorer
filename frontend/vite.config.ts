@@ -8,6 +8,18 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        // Split heavy, rarely-changing libraries into their own chunks so the
+        // browser can cache them across deploys and the initial parse is lighter.
+        manualChunks: {
+          charts: ['recharts'],
+          map: ['leaflet', 'react-leaflet'],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': {

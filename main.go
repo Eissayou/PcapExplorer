@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -32,14 +34,33 @@ import (
 )
 
 const (
-	Port               = "5432"
-	MaxGeoIPRequests   = 20 // TODO: make this configurable via env var
+	// DefaultPort is the TCP port the server listens on when the PORT
+	// environment variable is unset. Hosting platforms such as Cloud Run
+	// inject their own PORT, which takes precedence.
+	DefaultPort = "5432"
+
+	// DefaultMaxGeoIPRequests caps how many of the most frequent IPs are
+	// geo-located per request when GEOIP_MAX_LOOKUPS is unset.
+	DefaultMaxGeoIPRequests = 20
+
+	// DefaultGeoIPDBPath is the fallback GeoLite2 database location used when
+	// the GEOIP_DATABASE_PATH environment variable is unset.
 	DefaultGeoIPDBPath = "./data/GeoLite2-City.mmdb"
+
+	// MaxUploadBytes caps the total size of an upload request body. This bounds
+	// memory use (the file is read fully into memory for analysis) and guards
+	// against a client streaming an unbounded body.
+	MaxUploadBytes = 100 << 20 // 100 MB
 )
 
 // geoReader is the global GeoIP database reader.
 // It is initialized at startup and reused for all requests.
 var geoReader *geoip.Reader
+
+// maxGeoIPRequests caps the number of GeoIP lookups performed per analysis.
+// It is set once at startup from GEOIP_MAX_LOOKUPS, falling back to
+// DefaultMaxGeoIPRequests.
+var maxGeoIPRequests = DefaultMaxGeoIPRequests
 
 // AnalyzeResponse represents the JSON response returned by the /api/analyze endpoint.
 // It contains aggregated traffic statistics organized for visualization (GraphObjects),
@@ -114,6 +135,10 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	// Resolve runtime configuration from the environment.
+	port := getenvDefault("PORT", DefaultPort)
+	maxGeoIPRequests = getenvInt("GEOIP_MAX_LOOKUPS", DefaultMaxGeoIPRequests)
+
 	// Initialize GeoIP database
 	initGeoIP()
 
@@ -127,9 +152,16 @@ func main() {
 	mux.Handle("/", fs)
 
 	srv := &http.Server{
-		Addr:    ":" + Port,
+		Addr:    ":" + port,
 		Handler: mux,
-		// TODO: add ReadTimeout and WriteTimeout for production
+		// Timeouts guard against slow-client (Slowloris) attacks and stuck
+		// connections. Read/Write limits are generous to accommodate large
+		// PCAP uploads (up to 100MB) and the analysis that follows.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       120 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
 	}
 
 	// Set up channel for graceful shutdown signals
@@ -138,7 +170,7 @@ func main() {
 
 	// Start server in a goroutine to allow for shutdown handling
 	go func() {
-		slog.Info("Server starting", "port", Port)
+		slog.Info("Server starting", "port", port)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("Server failed to start", "error", err)
 			os.Exit(1)
@@ -190,6 +222,32 @@ func initGeoIP() {
 
 	geoReader = reader
 	slog.Info("GeoIP database loaded", "path", dbPath)
+}
+
+// getenvDefault returns the value of the environment variable named by key,
+// or fallback if the variable is unset or empty.
+func getenvDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// getenvInt returns the integer value of the environment variable named by key.
+// It returns fallback if the variable is unset, empty, or not a valid integer,
+// logging a warning in the invalid case.
+func getenvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("Invalid integer environment variable, using default",
+			"key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return n
 }
 
 // enableCORS is a middleware that adds Cross-Origin Resource Sharing headers
@@ -248,9 +306,20 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse multipart form with 100MB limit
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	// Cap the total request body size to bound memory use and reject oversized
+	// uploads before they are buffered. MaxBytesReader also surfaces a clear
+	// error from ParseMultipartForm once the limit is exceeded.
+	r.Body = http.MaxBytesReader(w, r.Body, MaxUploadBytes)
+
+	// Parse multipart form, keeping up to 10MB of parts in memory (the rest
+	// spills to temporary files); the overall size is bounded by MaxBytesReader.
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
 		slog.Warn("Failed to parse multipart form", "error", err)
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "File too large (max 100MB)", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Unable to parse form", http.StatusBadRequest)
 		return
 	}
@@ -259,6 +328,10 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	ip := r.FormValue("ip")
 	if ip == "" {
 		http.Error(w, "IP is required", http.StatusBadRequest)
+		return
+	}
+	if net.ParseIP(ip) == nil {
+		http.Error(w, "Invalid IP address", http.StatusBadRequest)
 		return
 	}
 
@@ -313,8 +386,9 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 // performGeoIPLookups queries the local GeoLite2 database for IP address locations.
 //
 // This function retrieves geographic information for the most frequently seen
-// IP addresses in the analysis results. It limits lookups to MaxGeoIPRequests
-// to prevent excessive processing for files with many unique IPs.
+// IP addresses in the analysis results. It limits lookups to maxGeoIPRequests
+// (configurable via GEOIP_MAX_LOOKUPS) to prevent excessive processing for
+// files with many unique IPs.
 //
 // Parameters:
 //   - sentIPs: Map of IP addresses to their occurrence counts.
@@ -349,7 +423,7 @@ func performGeoIPLookups(sentIPs map[string]int) ([]GeoLocation, string) {
 	// Perform lookups for top N IPs
 	lookups := 0
 	for _, item := range sortedIPs {
-		if lookups >= MaxGeoIPRequests {
+		if lookups >= maxGeoIPRequests {
 			break
 		}
 

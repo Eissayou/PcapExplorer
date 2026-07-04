@@ -4,9 +4,9 @@
 // purposes. It generates valid PCAP files with configurable Ethernet, IPv4, and TCP
 // layer data that can be used to validate pcap analyzer functionality.
 //
-// Usage:
+// Usage (run from the repository root):
 //
-//	go run gen_pcap.go
+//	go run ./cmd/gen_pcap
 //
 // Output:
 //

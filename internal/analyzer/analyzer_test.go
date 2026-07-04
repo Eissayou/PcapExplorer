@@ -200,3 +200,195 @@ func TestNewAnalysisResult(t *testing.T) {
 		t.Error("SentSize map is nil")
 	}
 }
+
+// generateLargePcap creates a synthetic PCAP file with the specified number of TCP packets.
+// Packets alternate between sent and received relative to the target IP 192.168.1.5.
+// Uses random source IPs to simulate realistic traffic patterns.
+func generateLargePcap(numPackets int) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	w := pcapgo.NewWriter(buf)
+	if err := w.WriteFileHeader(65536, layers.LinkTypeEthernet); err != nil {
+		return nil, err
+	}
+
+	eth := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
+		DstMAC:       net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x66},
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	baseTime := time.Now()
+	targetIP := net.IP{192, 168, 1, 5}
+
+	for i := 0; i < numPackets; i++ {
+		// Generate varying external IPs to simulate different hosts
+		externalIP := net.IP{10, byte(i % 256), byte((i / 256) % 256), byte((i / 65536) % 256)}
+
+		var ip *layers.IPv4
+		var tcp *layers.TCP
+
+		// Alternate between sent and received packets
+		if i%2 == 0 {
+			// Packet TO target (received by target)
+			ip = &layers.IPv4{
+				SrcIP:    externalIP,
+				DstIP:    targetIP,
+				Version:  4,
+				TTL:      64,
+				Protocol: layers.IPProtocolTCP,
+			}
+			tcp = &layers.TCP{
+				SrcPort: layers.TCPPort(1024 + (i % 60000)),
+				DstPort: layers.TCPPort(80),
+				Seq:     uint32(i * 100),
+			}
+		} else {
+			// Packet FROM target (sent by target)
+			ip = &layers.IPv4{
+				SrcIP:    targetIP,
+				DstIP:    externalIP,
+				Version:  4,
+				TTL:      64,
+				Protocol: layers.IPProtocolTCP,
+			}
+			tcp = &layers.TCP{
+				SrcPort: layers.TCPPort(80),
+				DstPort: layers.TCPPort(1024 + (i % 60000)),
+				Seq:     uint32(i * 100),
+				Ack:     uint32(i*100 + 1),
+			}
+		}
+		tcp.SetNetworkLayerForChecksum(ip)
+
+		// Add some payload data to simulate real traffic
+		payload := make([]byte, 100+(i%400)) // Variable payload 100-500 bytes
+
+		sb := gopacket.NewSerializeBuffer()
+		if err := gopacket.SerializeLayers(sb, opts, eth, ip, tcp, gopacket.Payload(payload)); err != nil {
+			return nil, err
+		}
+
+		packetData := sb.Bytes()
+		ci := gopacket.CaptureInfo{
+			Timestamp:      baseTime.Add(time.Duration(i) * time.Millisecond),
+			CaptureLength:  len(packetData),
+			Length:         len(packetData),
+			InterfaceIndex: 0,
+		}
+		if err := w.WritePacket(ci, packetData); err != nil {
+			return nil, err
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
+// TestAnalyzeLargeDataset tests processing a large number of packets and reports timing.
+// This is useful for understanding the performance characteristics of parallel processing.
+func TestAnalyzeLargeDataset(t *testing.T) {
+	packetCounts := []int{1000, 10000, 50000, 100000}
+
+	for _, numPackets := range packetCounts {
+		t.Run(formatPacketCount(numPackets), func(t *testing.T) {
+			// Generate test data
+			t.Logf("Generating %d packets...", numPackets)
+			genStart := time.Now()
+			pcapData, err := generateLargePcap(numPackets)
+			if err != nil {
+				t.Fatalf("Failed to generate PCAP: %v", err)
+			}
+			genDuration := time.Since(genStart)
+			t.Logf("Generation took %v (%.2f MB)", genDuration, float64(len(pcapData))/(1024*1024))
+
+			// Run the analysis and measure time
+			t.Logf("Analyzing %d packets...", numPackets)
+			analysisStart := time.Now()
+			result, err := Analyze(pcapData, "192.168.1.5")
+			analysisDuration := time.Since(analysisStart)
+
+			if err != nil {
+				t.Fatalf("Analyze failed: %v", err)
+			}
+
+			// Calculate statistics
+			totalSent := 0
+			totalReceived := 0
+			for _, v := range result.SentTime {
+				totalSent += v
+			}
+			for _, v := range result.ReceivedTime {
+				totalReceived += v
+			}
+
+			packetsPerSecond := float64(numPackets) / analysisDuration.Seconds()
+
+			t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			t.Logf("📊 Results for %d packets:", numPackets)
+			t.Logf("   ⏱️  Analysis time:     %v", analysisDuration)
+			t.Logf("   🚀 Packets/second:    %.0f", packetsPerSecond)
+			t.Logf("   📤 Total sent:        %d packets", totalSent)
+			t.Logf("   📥 Total received:    %d packets", totalReceived)
+			t.Logf("   🌐 Unique sent IPs:   %d", len(result.SentIP))
+			t.Logf("   🌐 Unique recv IPs:   %d", len(result.ReceivedIP))
+			t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+			// Verify results are reasonable (alternating packets = ~50/50 split)
+			expectedPerSide := numPackets / 2
+			tolerance := numPackets / 10 // Allow 10% variance
+
+			if totalSent < expectedPerSide-tolerance || totalSent > expectedPerSide+tolerance {
+				t.Errorf("Sent count %d is outside expected range [%d, %d]",
+					totalSent, expectedPerSide-tolerance, expectedPerSide+tolerance)
+			}
+			if totalReceived < expectedPerSide-tolerance || totalReceived > expectedPerSide+tolerance {
+				t.Errorf("Received count %d is outside expected range [%d, %d]",
+					totalReceived, expectedPerSide-tolerance, expectedPerSide+tolerance)
+			}
+		})
+	}
+}
+
+// formatPacketCount returns a human-readable string for packet counts (e.g., "100K")
+func formatPacketCount(n int) string {
+	if n >= 1000000 {
+		return string(rune('0'+n/1000000)) + "M"
+	}
+	if n >= 1000 {
+		return string(rune('0'+n/1000)) + "K"
+	}
+	return string(rune('0' + n))
+}
+
+// BenchmarkAnalyze provides standard Go benchmarks for the Analyze function.
+// Run with: go test -bench=. -benchmem ./internal/analyzer/...
+func BenchmarkAnalyze(b *testing.B) {
+	benchmarks := []struct {
+		name       string
+		numPackets int
+	}{
+		{"1K_packets", 1000},
+		{"10K_packets", 10000},
+		{"50K_packets", 50000},
+	}
+
+	for _, bm := range benchmarks {
+		// Generate data once before benchmark loop
+		pcapData, err := generateLargePcap(bm.numPackets)
+		if err != nil {
+			b.Fatalf("Failed to generate PCAP for %s: %v", bm.name, err)
+		}
+
+		b.Run(bm.name, func(b *testing.B) {
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				_, err := Analyze(pcapData, "192.168.1.5")
+				if err != nil {
+					b.Fatalf("Analyze failed: %v", err)
+				}
+			}
+		})
+	}
+}

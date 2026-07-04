@@ -24,6 +24,14 @@ RUN apk --no-cache add ca-certificates
 COPY --from=frontend-builder /app/dist ./frontend/dist
 # Copy backend binary
 COPY --from=backend-builder /app/server .
+# Copy the GeoLite2 database so the map works in the deployed container.
+# The file is git-ignored (MaxMind license) but present in the local build
+# context, so it is baked into the image at build time, not committed to git.
+COPY data/ ./data/
+
+# Run as a non-root user
+RUN adduser -D -u 10001 appuser
+USER appuser
 
 EXPOSE 5432
 CMD ["./server"]

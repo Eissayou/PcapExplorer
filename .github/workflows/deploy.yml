@@ -1,0 +1,47 @@
+name: Deploy to Azure Container Apps
+
+# Deploys on every push to main, or manually via the Actions tab.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# OIDC login to Azure needs id-token: write. No long-lived secrets stored.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The GeoLite2 database is git-ignored (MaxMind license forbids
+      # redistribution in a public repo), so fetch it fresh at build time.
+      - name: Download GeoLite2 City database
+        env:
+          MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          curl -sSL --fail \
+            "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz" \
+            -o geoip.tar.gz
+          tar -xzf geoip.tar.gz
+          mv GeoLite2-City_*/GeoLite2-City.mmdb data/GeoLite2-City.mmdb
+          rm -rf GeoLite2-City_* geoip.tar.gz
+          ls -lh data/GeoLite2-City.mmdb
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Reuses deploy-azure.sh: builds the image in the cloud (ACR) with the
+      # database baked in, and deploys to Container Apps with scale-to-zero.
+      - name: Build & deploy
+        run: bash deploy-azure.sh

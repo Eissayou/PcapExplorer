@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Node / frontend build artifacts (rebuilt inside the image)
+frontend/node_modules
+frontend/dist
+frontend/.env
+frontend/.env.local
+
+# Go build artifacts
+server
+pcap-analyzer
+*.exe
+*.dll
+vendor/
+
+# Local runtime + dev files
+*.log
+*.tar.gz
+test.pcap
+
+# Docs / meta (not needed at runtime)
+README.md
+frontend/README.md
+
+# NOTE: data/GeoLite2-City.mmdb is intentionally NOT ignored here — it must be
+# in the build context so the Dockerfile can bake it into the image. It stays
+# git-ignored (see .gitignore) so it is never committed to the repo.

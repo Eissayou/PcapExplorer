@@ -5,29 +5,24 @@ import { MapComponent } from './MapComponent';
 
 interface Props {
     data: AnalyzeResponse;
+    targetIp?: string;
 }
 
 const StatCard = ({ title, value, icon, color }: { title: string, value: string | number, icon: React.ReactNode, color: string }) => (
-    <div className="bg-white overflow-hidden shadow rounded-lg border-l-4" style={{ borderColor: color }}>
-        <div className="p-5">
-            <div className="flex items-center">
-                <div className="flex-shrink-0">
-                    {icon}
-                </div>
-                <div className="ml-5 w-0 flex-1">
-                    <dl>
-                        <dt className="text-sm font-medium text-gray-500 truncate">{title}</dt>
-                        <dd>
-                            <div className="text-lg font-bold text-gray-900">{value}</div>
-                        </dd>
-                    </dl>
-                </div>
+    <div className="bg-white shadow-sm hover:shadow-md transition-shadow rounded-xl border border-slate-100">
+        <div className="p-5 flex items-center gap-4">
+            <div className="grid place-items-center h-12 w-12 rounded-xl shrink-0" style={{ backgroundColor: `${color}1a`, color }}>
+                {icon}
+            </div>
+            <div className="min-w-0">
+                <dt className="text-xs font-medium text-slate-500 uppercase tracking-wide truncate">{title}</dt>
+                <dd className="text-xl font-bold text-slate-900 truncate">{value}</dd>
             </div>
         </div>
     </div>
 );
 
-export const Dashboard: React.FC<Props> = ({ data }) => {
+export const Dashboard: React.FC<Props> = ({ data, targetIp }) => {
     const { graphObjects, locations, mapError } = data;
 
     // Transform data for charts
@@ -68,34 +63,53 @@ export const Dashboard: React.FC<Props> = ({ data }) => {
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     };
 
+    const hasTraffic = totalSent > 0 || totalReceived > 0;
+
     return (
         <div className="space-y-8 max-w-7xl mx-auto pb-12">
+
+            {/* Results header */}
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <h2 className="text-xl font-bold text-slate-900">Traffic overview</h2>
+                {targetIp && (
+                    <span className="text-sm text-slate-500">
+                        for <code className="px-1.5 py-0.5 rounded bg-slate-200/70 text-slate-700 font-medium">{targetIp}</code>
+                    </span>
+                )}
+            </div>
+
+            {!hasTraffic && (
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-5 text-sm">
+                    No TCP traffic matched <strong>{targetIp || 'the target IP'}</strong> in this capture. Double-check the
+                    IP address, or confirm the file contains TCP packets involving that host.
+                </div>
+            )}
 
             {/* Stats Summary */}
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
                 <StatCard
-                    title="Total Packets Sent"
+                    title="Packets Sent"
                     value={totalSent.toLocaleString()}
-                    color="#8884d8"
-                    icon={<svg className="h-6 w-6 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>}
+                    color="#6366f1"
+                    icon={<svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>}
                 />
                 <StatCard
-                    title="Total Packets Received"
+                    title="Packets Received"
                     value={totalReceived.toLocaleString()}
-                    color="#82ca9d"
-                    icon={<svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>}
+                    color="#10b981"
+                    icon={<svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>}
                 />
                 <StatCard
-                    title="Total Data Transfer"
+                    title="Data Sent"
                     value={formatBytes(totalBytes)}
-                    color="#ff7300"
-                    icon={<svg className="h-6 w-6 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>}
+                    color="#f59e0b"
+                    icon={<svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /></svg>}
                 />
                  <StatCard
                     title="Top Destination"
                     value={topDestIP}
                     color="#3b82f6"
-                    icon={<svg className="h-6 w-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>}
+                    icon={<svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>}
                 />
             </div>
 

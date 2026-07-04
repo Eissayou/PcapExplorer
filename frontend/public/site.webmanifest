@@ -1,0 +1,12 @@
+{
+  "name": "PCAP Explorer — by Jason Eissayou",
+  "short_name": "PCAP Explorer",
+  "description": "Free network-analysis tool that maps where your packets go. Built by Jason Eissayou (eissayou.com).",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#4f46e5",
+  "icons": [
+    { "src": "/je.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

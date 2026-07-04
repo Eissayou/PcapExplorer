@@ -19,16 +19,48 @@ I got tired of firing up Wireshark every time I wanted to quickly see traffic pa
 ```bash
 # Clone the repo
 git clone https://github.com/Eissayou/PcapExplorer.git
-cd PcapExplorer/pcap-analyzer
+cd PcapExplorer
 
-# Download GeoLite2 database (free, requires MaxMind account)
-# Place GeoLite2-City.mmdb in ./data/
+# (Optional) Download the GeoLite2 database to enable the map — free, needs a
+# MaxMind account. Place GeoLite2-City.mmdb in ./data/. Without it the app
+# still works; the map is just disabled.
+```
 
-# Run the server
+**Run it (two terminals, dev mode):**
+
+```bash
+# Terminal 1 — Go backend on :5432
 go run .
 
-# Open http://localhost:5432
+# Terminal 2 — Vite dev server (proxies /api to the backend)
+cd frontend
+npm install
+npm run dev          # open the URL Vite prints, e.g. http://localhost:5173
 ```
+
+**Run it as one server (build the frontend, then serve everything on :5432):**
+
+```bash
+cd frontend && npm install && npm run build && cd ..
+go run .             # serves the built frontend + API at http://localhost:5432
+```
+
+**Or with Docker (builds frontend + backend into one image):**
+
+```bash
+docker build -t pcap-explorer .
+docker run -p 5432:5432 pcap-explorer   # http://localhost:5432
+```
+
+## Configuration
+
+All settings are optional environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `5432` | Port the server listens on (hosting platforms like Cloud Run set this automatically). |
+| `GEOIP_DATABASE_PATH` | `./data/GeoLite2-City.mmdb` | Path to the MaxMind GeoLite2 City database. |
+| `GEOIP_MAX_LOOKUPS` | `20` | Max number of top IPs geo-located per analysis. |
 
 ## Tech Stack
 
@@ -46,14 +78,16 @@ go run .
 ## Project Structure
 
 ```
-pcap-analyzer/
-├── main.go              # HTTP server + API handler
-├── pkg/
-│   ├── analyzer/        # PCAP parsing logic
-│   └── geoip/           # GeoIP database reader
-├── cmd/gen_pcap/        # Test PCAP generator
-├── data/                # GeoLite2-City.mmdb goes here
-└── frontend/            # React app
+PcapExplorer/
+├── main.go              # HTTP server + /api/analyze handler
+├── internal/
+│   ├── analyzer/        # PCAP/PCAPNG parsing + TCP traffic analysis
+│   └── geoip/           # MaxMind GeoLite2 database reader
+├── cmd/gen_pcap/        # Test PCAP file generator
+├── data/                # GeoLite2-City.mmdb goes here (git-ignored)
+├── frontend/            # React + TypeScript + Vite app
+├── Dockerfile           # Multi-stage build (frontend + backend)
+└── go.mod
 ```
 
 ## What I Learned
