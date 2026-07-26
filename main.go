@@ -14,18 +14,18 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,6 +51,29 @@ const (
 	// memory use (the file is read fully into memory for analysis) and guards
 	// against a client streaming an unbounded body.
 	MaxUploadBytes = 100 << 20 // 100 MB
+
+	// MaxHostSuggestions is how many of the busiest endpoints are returned with
+	// an analysis so the client can offer them as alternative targets.
+	MaxHostSuggestions = 25
+
+	// StaticRoot is the directory the built frontend is served from.
+	StaticRoot = "./frontend/dist"
+
+	// GzipMinBytes is the response size below which compression costs more than
+	// it saves, since a small body fits in one packet either way.
+	GzipMinBytes = 1024
+)
+
+// hashedAssetPrefix marks build output whose filename contains a content hash.
+// Those URLs change whenever the bytes change, so they can be cached forever.
+const hashedAssetPrefix = "/assets/"
+
+// Messages sent straight to the browser when an upload cannot be used. Parser
+// errors mention magic bytes and reader internals, which mean nothing to
+// someone who just picked the wrong file, so the detail stays in the logs.
+const (
+	UnreadableCaptureMessage = "That file could not be read as a packet capture. PCAP Explorer accepts .pcap, .pcapng and .cap files."
+	NoTCPTrafficMessage      = "No TCP traffic found in this capture. PCAP Explorer analyzes TCP packets only."
 )
 
 // geoReader is the global GeoIP database reader.
@@ -67,6 +90,19 @@ var maxGeoIPRequests = DefaultMaxGeoIPRequests
 // geographic locations for the most frequent IP addresses (Locations), and any
 // errors encountered during GeoIP lookups (MapError).
 type AnalyzeResponse struct {
+	// TargetIP is the host the analysis is relative to. It echoes back the IP
+	// the client asked for, or the one the server picked when the client left
+	// the field empty.
+	TargetIP string `json:"targetIp"`
+
+	// AutoDetected reports whether TargetIP was chosen by the server rather
+	// than supplied by the client.
+	AutoDetected bool `json:"autoDetected"`
+
+	// Hosts lists the busiest endpoints in the capture so the client can offer
+	// them as alternative targets without uploading the file again.
+	Hosts []analyzer.HostCount `json:"hosts"`
+
 	// GraphObjects contains aggregated packet and traffic statistics for visualization.
 	GraphObjects GraphData `json:"graphObjects"`
 
@@ -96,6 +132,9 @@ type GraphData struct {
 
 	// SentSize maps relative time (seconds) to total bytes sent.
 	SentSize map[int]int `json:"sentSize"`
+
+	// ReceivedSize maps relative time (seconds) to total bytes received.
+	ReceivedSize map[int]int `json:"receivedSize"`
 }
 
 // GeoLocation represents geographic information for a specific IP address.
@@ -148,8 +187,7 @@ func main() {
 	mux.HandleFunc("/api/analyze", enableCORS(handleAnalyze))
 
 	// Serve frontend
-	fs := http.FileServer(http.Dir("./frontend/dist"))
-	mux.Handle("/", fs)
+	mux.Handle("/", staticFiles(StaticRoot))
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -281,24 +319,140 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// staticFiles serves the built frontend with the caching, compression and
+// security headers a production site needs.
+//
+// Cache lifetimes follow the filename: Vite writes a content hash into every
+// file under /assets/, so those URLs are safe to cache forever, while index.html
+// has to be revalidated on each visit or a deploy would never reach anyone.
+func staticFiles(root string) http.Handler {
+	fileServer := http.FileServer(http.Dir(root))
+
+	return gzipResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("X-Frame-Options", "SAMEORIGIN")
+
+		if strings.HasPrefix(r.URL.Path, hashedAssetPrefix) {
+			h.Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else if strings.HasSuffix(r.URL.Path, "/") || strings.HasSuffix(r.URL.Path, ".html") {
+			h.Set("Cache-Control", "no-cache")
+		} else {
+			// Everything else (the sample capture, icons, robots.txt) is stable
+			// but does replace in place, so cache it for a day.
+			h.Set("Cache-Control", "public, max-age=86400")
+		}
+
+		fileServer.ServeHTTP(w, r)
+	}))
+}
+
+// compressibleTypes are the content types worth gzipping. Images, fonts and
+// packet captures are already compressed or effectively random, so running them
+// through gzip burns CPU for nothing.
+var compressibleTypes = []string{"text/", "application/javascript", "application/json", "image/svg+xml", "application/xml", "application/manifest+json"}
+
+// gzipResponses compresses responses for clients that advertise gzip support.
+//
+// Compression is decided lazily on the first Write, once the content type is
+// known: that keeps small files and already-compressed formats uncompressed
+// without the handler having to know anything about the response in advance.
+func gzipResponses(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Add("Vary", "Accept-Encoding")
+
+		gw := &gzipWriter{ResponseWriter: w}
+		defer gw.Close()
+		next.ServeHTTP(gw, r)
+	})
+}
+
+// gzipWriter wraps an http.ResponseWriter and swaps in a gzip stream once it
+// can tell the response is worth compressing.
+type gzipWriter struct {
+	http.ResponseWriter
+	gz      *gzip.Writer
+	decided bool
+}
+
+func (g *gzipWriter) WriteHeader(status int) {
+	g.decide(status)
+	g.ResponseWriter.WriteHeader(status)
+}
+
+func (g *gzipWriter) Write(b []byte) (int, error) {
+	if !g.decided {
+		g.decide(http.StatusOK)
+	}
+	if g.gz != nil {
+		return g.gz.Write(b)
+	}
+	return g.ResponseWriter.Write(b)
+}
+
+// decide picks compressed or plain for this response, exactly once.
+func (g *gzipWriter) decide(status int) {
+	if g.decided {
+		return
+	}
+	g.decided = true
+
+	h := g.Header()
+	if status != http.StatusOK || h.Get("Content-Encoding") != "" {
+		return
+	}
+	if size, err := strconv.Atoi(h.Get("Content-Length")); err == nil && size < GzipMinBytes {
+		return
+	}
+
+	contentType := h.Get("Content-Type")
+	for _, prefix := range compressibleTypes {
+		if strings.HasPrefix(contentType, prefix) {
+			h.Set("Content-Encoding", "gzip")
+			// The compressed body is a different length, and Go has no way to
+			// know it up front while streaming.
+			h.Del("Content-Length")
+			g.gz = gzip.NewWriter(g.ResponseWriter)
+			return
+		}
+	}
+}
+
+func (g *gzipWriter) Close() {
+	if g.gz != nil {
+		if err := g.gz.Close(); err != nil {
+			slog.Warn("Failed to flush gzip response", "error", err)
+		}
+	}
+}
+
 // handleAnalyze processes PCAP file upload requests and returns traffic analysis.
 //
 // This handler expects a multipart/form-data POST request containing:
 //   - "file": The PCAP or PCAPNG file to analyze (required).
-//   - "ip": The target IP address to track sent/received traffic (required).
+//   - "ip": The target IP address to track sent/received traffic (optional;
+//     defaults to the busiest host in the capture).
 //
 // The handler performs the following operations:
 //  1. Validates the request method and form data.
 //  2. Parses the uploaded PCAP file.
-//  3. Analyzes traffic patterns relative to the target IP.
-//  4. Optionally performs GeoIP lookups for the top N most frequent IPs.
-//  5. Returns aggregated statistics as JSON.
+//  3. Resolves the target IP, auto-detecting it when the client omitted one.
+//  4. Analyzes traffic patterns relative to the target IP.
+//  5. Optionally performs GeoIP lookups for the top N most frequent IPs.
+//  6. Returns aggregated statistics as JSON.
 //
 // Response format: AnalyzeResponse (JSON)
 //
 // Error responses:
-//   - 400 Bad Request: Missing or invalid form data.
+//   - 400 Bad Request: Missing or invalid form data, or an unreadable capture.
 //   - 405 Method Not Allowed: Non-POST request.
+//   - 413 Request Entity Too Large: Upload above MaxUploadBytes.
+//   - 422 Unprocessable Entity: Readable capture with no TCP traffic to analyze.
 //   - 500 Internal Server Error: File processing or analysis failure.
 func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -324,13 +478,11 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract and validate target IP
-	ip := r.FormValue("ip")
-	if ip == "" {
-		http.Error(w, "IP is required", http.StatusBadRequest)
-		return
-	}
-	if net.ParseIP(ip) == nil {
+	// The target IP is optional: when it is omitted the server analyzes the
+	// busiest host in the capture, which is almost always the machine the
+	// capture was taken on.
+	ip := strings.TrimSpace(r.FormValue("ip"))
+	if ip != "" && net.ParseIP(ip) == nil {
 		http.Error(w, "Invalid IP address", http.StatusBadRequest)
 		return
 	}
@@ -351,13 +503,28 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("Analyzing pcap", "targetIP", ip, "size", len(content))
+	autoDetected := ip == ""
+	if autoDetected {
+		busiest, err := analyzer.BusiestHost(content)
+		if err != nil {
+			slog.Warn("Host detection failed", "error", err)
+			http.Error(w, UnreadableCaptureMessage, http.StatusBadRequest)
+			return
+		}
+		if busiest == "" {
+			http.Error(w, NoTCPTrafficMessage, http.StatusUnprocessableEntity)
+			return
+		}
+		ip = busiest
+	}
+
+	slog.Info("Analyzing pcap", "targetIP", ip, "autoDetected", autoDetected, "size", len(content))
 
 	// Perform PCAP analysis
 	result, err := analyzer.Analyze(content, ip)
 	if err != nil {
 		slog.Error("Analysis failed", "error", err)
-		http.Error(w, fmt.Sprintf("Analysis failed: %v", err), http.StatusInternalServerError)
+		http.Error(w, UnreadableCaptureMessage, http.StatusBadRequest)
 		return
 	}
 
@@ -366,12 +533,16 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 
 	// Construct and send response
 	resp := AnalyzeResponse{
+		TargetIP:     ip,
+		AutoDetected: autoDetected,
+		Hosts:        analyzer.RankHosts(result.Hosts, MaxHostSuggestions),
 		GraphObjects: GraphData{
 			SentTime:     result.SentTime,
 			ReceivedTime: result.ReceivedTime,
 			SentIP:       result.SentIP,
 			ReceivedIP:   result.ReceivedIP,
 			SentSize:     result.SentSize,
+			ReceivedSize: result.ReceivedSize,
 		},
 		Locations: locations,
 		MapError:  mapError,
@@ -407,44 +578,31 @@ func performGeoIPLookups(sentIPs map[string]int) ([]GeoLocation, string) {
 		return locations, "GeoIP database not configured. Download GeoLite2-City.mmdb from maxmind.com"
 	}
 
-	// Sort IPs by packet count (descending) to prioritize most frequent
-	type ipCount struct {
-		IP    string
-		Count int
-	}
-	sortedIPs := make([]ipCount, 0, len(sentIPs))
-	for ip, count := range sentIPs {
-		sortedIPs = append(sortedIPs, ipCount{IP: ip, Count: count})
-	}
-	sort.Slice(sortedIPs, func(i, j int) bool {
-		return sortedIPs[i].Count > sortedIPs[j].Count
-	})
-
-	// Perform lookups for top N IPs
-	lookups := 0
-	for _, item := range sortedIPs {
-		if lookups >= maxGeoIPRequests {
+	// Look up the most frequent destinations first, stopping once the budget is
+	// spent. Private addresses resolve to no coordinates and are skipped, so the
+	// budget counts results rather than attempts.
+	for _, host := range analyzer.RankHosts(sentIPs, 0) {
+		if len(locations) >= maxGeoIPRequests {
 			break
 		}
 
-		loc, err := geoReader.GetLocation(item.IP)
+		loc, err := geoReader.GetLocation(host.IP)
 		if err != nil {
-			slog.Warn("GeoIP lookup failed", "ip", item.IP, "error", err)
+			slog.Warn("GeoIP lookup failed", "ip", host.IP, "error", err)
+			continue
+		}
+		if loc.Latitude == 0 && loc.Longitude == 0 {
 			continue
 		}
 
-		// Only include results with valid coordinates
-		if loc.Latitude != 0 || loc.Longitude != 0 {
-			locations = append(locations, GeoLocation{
-				IP:        item.IP,
-				City:      loc.City,
-				Country:   loc.Country,
-				Latitude:  loc.Latitude,
-				Longitude: loc.Longitude,
-				Count:     item.Count,
-			})
-			lookups++
-		}
+		locations = append(locations, GeoLocation{
+			IP:        host.IP,
+			City:      loc.City,
+			Country:   loc.Country,
+			Latitude:  loc.Latitude,
+			Longitude: loc.Longitude,
+			Count:     host.Packets,
+		})
 	}
 
 	return locations, ""

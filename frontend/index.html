@@ -7,44 +7,48 @@
     <link rel="manifest" href="/site.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    <title>PCAP Explorer — Visualize Network Traffic on a Map | Jason Eissayou</title>
+    <title>PCAP Explorer: Analyze a PCAP File Online and Map Your Traffic | Jason Eissayou</title>
     <meta
       name="description"
-      content="PCAP Explorer by Jason Eissayou: a free tool that parses .pcap/.pcapng captures and maps packet destinations on an interactive world map, with a traffic timeline and top-talkers. Built with Go and React."
-    />
-    <meta
-      name="keywords"
-      content="PCAP Explorer, Jason Eissayou, eissayou, eissayou.com, PcapExplorer, pcap analyzer, packet capture visualizer, network traffic map, GeoIP, MaxMind GeoLite2, Go, gopacket, React, network security tool"
+      content="Free online PCAP analyzer by Jason Eissayou. Upload a .pcap or .pcapng capture and get a traffic timeline, the top talkers, and every destination plotted on a world map. No install, no account, IPv4 and IPv6."
     />
     <meta name="author" content="Jason Eissayou" />
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
     <meta name="theme-color" content="#4f46e5" />
     <meta name="application-name" content="PCAP Explorer" />
-    <link rel="canonical" href="https://pcap-explorer.whitesmoke-6fe9a4df.westus2.azurecontainerapps.io/" />
-    <!-- Identity / authorship signals -->
+    <link rel="canonical" href="%SITE_URL%/" />
+
+    <!-- Identity signals: both the app and eissayou.com point at the same person. -->
     <link rel="author" href="https://www.eissayou.com/" />
     <link rel="me" href="https://www.eissayou.com/" />
     <link rel="me" href="https://github.com/Eissayou" />
 
+    <!-- Speed up the first map render; tiles come from a third-party host. -->
+    <link rel="preconnect" href="https://a.tile.openstreetmap.org" crossorigin />
+    <link rel="dns-prefetch" href="https://a.tile.openstreetmap.org" />
+
     <!-- Open Graph -->
     <meta property="og:site_name" content="PCAP Explorer" />
-    <meta property="og:title" content="PCAP Explorer — Visualize Network Traffic on a Map" />
+    <meta property="og:title" content="PCAP Explorer: analyze a PCAP file online and map your traffic" />
     <meta
       property="og:description"
-      content="Drag and drop a .pcap file and instantly see where your packets are going on a world map. A free network analysis tool by Jason Eissayou (eissayou.com)."
+      content="Drop in a .pcap file and see where your packets are going on a world map. A free network analysis tool by Jason Eissayou (eissayou.com)."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://pcap-explorer.whitesmoke-6fe9a4df.westus2.azurecontainerapps.io/" />
+    <meta property="og:url" content="%SITE_URL%/" />
     <meta property="og:image" content="https://www.eissayou.com/assets/network-packets.png" />
-    <meta property="og:image:alt" content="PCAP Explorer interface visualizing packet destinations on a world map" />
+    <meta property="og:image:width" content="1460" />
+    <meta property="og:image:height" content="730" />
+    <meta property="og:image:alt" content="PCAP Explorer showing packet destinations plotted on a world map" />
+    <meta property="og:locale" content="en_US" />
     <meta property="article:author" content="https://www.eissayou.com/" />
 
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="PCAP Explorer — Visualize Network Traffic on a Map" />
+    <meta name="twitter:title" content="PCAP Explorer: analyze a PCAP file online and map your traffic" />
     <meta
       name="twitter:description"
-      content="Drag and drop a .pcap file and instantly see where your packets are going on a world map. A free network analysis tool by Jason Eissayou."
+      content="Drop in a .pcap file and see where your packets are going on a world map. A free network analysis tool by Jason Eissayou."
     />
     <meta name="twitter:image" content="https://www.eissayou.com/assets/network-packets.png" />
     <meta name="twitter:image:alt" content="PCAP Explorer network traffic map" />
@@ -54,25 +58,40 @@
         "@context": "https://schema.org",
         "@graph": [
           {
-            "@type": "SoftwareApplication",
-            "@id": "https://pcap-explorer.whitesmoke-6fe9a4df.westus2.azurecontainerapps.io/#app",
+            "@type": "WebSite",
+            "@id": "%SITE_URL%/#website",
+            "url": "%SITE_URL%/",
             "name": "PCAP Explorer",
-            "url": "https://pcap-explorer.whitesmoke-6fe9a4df.westus2.azurecontainerapps.io/",
+            "inLanguage": "en",
+            "publisher": { "@id": "https://www.eissayou.com/#person" }
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "%SITE_URL%/#app",
+            "name": "PCAP Explorer",
+            "alternateName": ["PcapExplorer", "PCAP Analyzer"],
+            "url": "%SITE_URL%/",
             "description": "A free web tool that parses .pcap and .pcapng captures and visualizes packet destinations on an interactive world map, with a traffic timeline and a top-talkers list. Supports IPv4 and IPv6.",
             "applicationCategory": "SecurityApplication",
+            "applicationSubCategory": "Network Analysis",
             "operatingSystem": "Web",
             "browserRequirements": "Requires JavaScript. Requires HTML5.",
+            "isAccessibleForFree": true,
             "image": "https://www.eissayou.com/assets/network-packets.png",
             "screenshot": "https://www.eissayou.com/assets/network-packets.png",
             "featureList": [
               "Drag-and-drop PCAP/PCAPNG analysis",
+              "Automatic detection of the busiest host in a capture",
               "Traffic timeline of sent and received packets",
+              "Throughput timeline in bytes per second",
               "Top talkers (most frequent peer IPs)",
               "GeoIP mapping of destinations on a world map",
               "IPv4 and IPv6 support"
             ],
             "author": { "@id": "https://www.eissayou.com/#person" },
             "creator": { "@id": "https://www.eissayou.com/#person" },
+            "maintainer": { "@id": "https://www.eissayou.com/#person" },
+            "isPartOf": { "@id": "%SITE_URL%/#website" },
             "sameAs": [
               "https://www.eissayou.com/projects/pcap-tracker.html",
               "https://github.com/Eissayou/PcapExplorer"
@@ -83,9 +102,21 @@
             "@type": "Person",
             "@id": "https://www.eissayou.com/#person",
             "name": "Jason Eissayou",
+            "givenName": "Jason",
+            "familyName": "Eissayou",
             "url": "https://www.eissayou.com/",
-            "jobTitle": "Software Engineer",
-            "knowsAbout": ["Network Analysis", "Cloud Security", "Packet Capture", "Go", "React", "Artificial Intelligence"],
+            "image": "%SITE_URL%/je.png",
+            "jobTitle": "Software Developer",
+            "description": "Software developer working in cloud security and AI, and the author of PCAP Explorer.",
+            "knowsAbout": [
+              "Network Analysis",
+              "Packet Capture",
+              "Cloud Security",
+              "Go",
+              "React",
+              "Azure",
+              "Artificial Intelligence"
+            ],
             "sameAs": [
               "https://www.eissayou.com/",
               "https://github.com/Eissayou"
@@ -105,17 +136,20 @@
   </head>
   <body>
     <div id="root"></div>
-    <!-- Crawlable fallback for bots that don't execute JavaScript; also carries the authorship backlink. -->
+    <!-- Fallback for crawlers that do not run JavaScript. It carries the same
+         claims as the rendered page, plus the authorship backlink. -->
     <noscript>
-      <h1>PCAP Explorer — Visualize Network Traffic on a Map</h1>
+      <h1>PCAP Explorer: analyze a PCAP file online and map your traffic</h1>
       <p>
-        PCAP Explorer is a free network-analysis tool that parses <code>.pcap</code> and <code>.pcapng</code> capture
-        files and maps where your packets are going on an interactive world map, with a traffic timeline and a
-        top-talkers list. It supports both IPv4 and IPv6.
+        PCAP Explorer is a free network analysis tool that parses <code>.pcap</code> and <code>.pcapng</code> capture
+        files and shows where your packets are going on an interactive world map, alongside a traffic timeline and a
+        list of top talkers. It reads IPv4 and IPv6, detects the busiest host in a capture automatically, and needs no
+        account or install.
       </p>
       <p>
-        Built by <a href="https://www.eissayou.com/" rel="author">Jason Eissayou</a>. Read the
-        <a href="https://www.eissayou.com/projects/pcap-tracker.html">project case study on eissayou.com</a> or view the
+        This page needs JavaScript to run the analyzer. Built by
+        <a href="https://www.eissayou.com/" rel="author">Jason Eissayou</a>. Read the
+        <a href="https://www.eissayou.com/projects/pcap-tracker.html">project case study on eissayou.com</a>, or view the
         <a href="https://github.com/Eissayou/PcapExplorer">source on GitHub</a>.
       </p>
     </noscript>
