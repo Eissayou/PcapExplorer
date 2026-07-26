@@ -392,3 +392,184 @@ func BenchmarkAnalyze(b *testing.B) {
 		})
 	}
 }
+
+// flow is one packet to write into a test capture.
+type flow struct {
+	src, dst string
+	atSecond int
+}
+
+// buildCapture writes the given packets into an in-memory PCAP file. IPv6 flows
+// are detected from the address, so a single capture can mix both stacks.
+func buildCapture(t *testing.T, flows ...flow) []byte {
+	t.Helper()
+
+	buf := new(bytes.Buffer)
+	w := pcapgo.NewWriter(buf)
+	if err := w.WriteFileHeader(65536, layers.LinkTypeEthernet); err != nil {
+		t.Fatalf("WriteFileHeader: %v", err)
+	}
+
+	base := time.Unix(1700000000, 0)
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+
+	for i, f := range flows {
+		src, dst := net.ParseIP(f.src), net.ParseIP(f.dst)
+		if src == nil || dst == nil {
+			t.Fatalf("flow %d: bad IP %q -> %q", i, f.src, f.dst)
+		}
+
+		isV6 := src.To4() == nil
+		eth := &layers.Ethernet{
+			SrcMAC:       net.HardwareAddr{0, 1, 2, 3, 4, 5},
+			DstMAC:       net.HardwareAddr{6, 7, 8, 9, 10, 11},
+			EthernetType: layers.EthernetTypeIPv4,
+		}
+		tcp := &layers.TCP{SrcPort: 1234, DstPort: 443}
+
+		var netLayer gopacket.SerializableLayer
+		if isV6 {
+			eth.EthernetType = layers.EthernetTypeIPv6
+			ip := &layers.IPv6{Version: 6, SrcIP: src, DstIP: dst, NextHeader: layers.IPProtocolTCP, HopLimit: 64}
+			if err := tcp.SetNetworkLayerForChecksum(ip); err != nil {
+				t.Fatalf("flow %d: %v", i, err)
+			}
+			netLayer = ip
+		} else {
+			ip := &layers.IPv4{Version: 4, SrcIP: src, DstIP: dst, TTL: 64, Protocol: layers.IPProtocolTCP}
+			if err := tcp.SetNetworkLayerForChecksum(ip); err != nil {
+				t.Fatalf("flow %d: %v", i, err)
+			}
+			netLayer = ip
+		}
+
+		sb := gopacket.NewSerializeBuffer()
+		if err := gopacket.SerializeLayers(sb, opts, eth, netLayer, tcp, gopacket.Payload(make([]byte, 100))); err != nil {
+			t.Fatalf("flow %d: SerializeLayers: %v", i, err)
+		}
+		ci := gopacket.CaptureInfo{
+			Timestamp:     base.Add(time.Duration(f.atSecond) * time.Second),
+			CaptureLength: len(sb.Bytes()),
+			Length:        len(sb.Bytes()),
+		}
+		if err := w.WritePacket(ci, sb.Bytes()); err != nil {
+			t.Fatalf("flow %d: WritePacket: %v", i, err)
+		}
+	}
+	return buf.Bytes()
+}
+
+// TestAnalyzeTracksReceivedSize checks that inbound bytes are tallied, not just
+// inbound packet counts.
+func TestAnalyzeTracksReceivedSize(t *testing.T) {
+	data := buildCapture(t,
+		flow{"10.0.0.9", "10.0.0.1", 0},
+		flow{"10.0.0.9", "10.0.0.1", 0},
+	)
+
+	res, err := Analyze(data, "10.0.0.1")
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if res.ReceivedTime[0] != 2 {
+		t.Errorf("ReceivedTime[0] = %d, want 2", res.ReceivedTime[0])
+	}
+	if res.ReceivedSize[0] <= 0 {
+		t.Errorf("ReceivedSize[0] = %d, want > 0", res.ReceivedSize[0])
+	}
+	if res.SentSize[0] != 0 {
+		t.Errorf("SentSize[0] = %d, want 0", res.SentSize[0])
+	}
+}
+
+// TestAnalyzeCountsEveryHost checks that the Hosts tally covers both endpoints
+// of every packet, including hosts the target never talked to.
+func TestAnalyzeCountsEveryHost(t *testing.T) {
+	data := buildCapture(t,
+		flow{"10.0.0.1", "10.0.0.2", 0},
+		flow{"10.0.0.2", "10.0.0.1", 0},
+		flow{"10.0.0.3", "10.0.0.4", 1}, // unrelated to the target
+	)
+
+	res, err := Analyze(data, "10.0.0.1")
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+
+	want := map[string]int{"10.0.0.1": 2, "10.0.0.2": 2, "10.0.0.3": 1, "10.0.0.4": 1}
+	for ip, count := range want {
+		if res.Hosts[ip] != count {
+			t.Errorf("Hosts[%s] = %d, want %d", ip, res.Hosts[ip], count)
+		}
+	}
+	if len(res.Hosts) != len(want) {
+		t.Errorf("Hosts has %d entries, want %d", len(res.Hosts), len(want))
+	}
+}
+
+// TestAnalyzeIPv6 checks that v6 packets are parsed and that addresses come back
+// in their canonical form rather than the IPv4-mapped spelling.
+func TestAnalyzeIPv6(t *testing.T) {
+	data := buildCapture(t, flow{"2001:db8::1", "2001:db8::2", 0})
+
+	res, err := Analyze(data, "2001:db8::1")
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if res.SentIP["2001:db8::2"] != 1 {
+		t.Errorf("SentIP[2001:db8::2] = %d, want 1 (got %v)", res.SentIP["2001:db8::2"], res.SentIP)
+	}
+}
+
+// TestBusiestHost checks the auto-detection used when a caller supplies no
+// target IP.
+func TestBusiestHost(t *testing.T) {
+	data := buildCapture(t,
+		flow{"10.0.0.1", "10.0.0.2", 0},
+		flow{"10.0.0.1", "10.0.0.3", 0},
+		flow{"10.0.0.4", "10.0.0.1", 1},
+	)
+
+	got, err := BusiestHost(data)
+	if err != nil {
+		t.Fatalf("BusiestHost: %v", err)
+	}
+	if got != "10.0.0.1" {
+		t.Errorf("BusiestHost = %q, want 10.0.0.1", got)
+	}
+}
+
+// TestBusiestHostNoTCP checks that a capture without TCP reports no host rather
+// than failing, so the handler can return a useful message.
+func TestBusiestHostNoTCP(t *testing.T) {
+	buf := new(bytes.Buffer)
+	w := pcapgo.NewWriter(buf)
+	if err := w.WriteFileHeader(65536, layers.LinkTypeEthernet); err != nil {
+		t.Fatalf("WriteFileHeader: %v", err)
+	}
+
+	got, err := BusiestHost(buf.Bytes())
+	if err != nil {
+		t.Fatalf("BusiestHost: %v", err)
+	}
+	if got != "" {
+		t.Errorf("BusiestHost = %q, want empty", got)
+	}
+}
+
+// TestRankHosts checks descending order, the tie-break on address, and the limit.
+func TestRankHosts(t *testing.T) {
+	hosts := map[string]int{"10.0.0.3": 5, "10.0.0.1": 9, "10.0.0.2": 5}
+
+	ranked := RankHosts(hosts, 0)
+	wantOrder := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	for i, ip := range wantOrder {
+		if ranked[i].IP != ip {
+			t.Errorf("ranked[%d].IP = %s, want %s", i, ranked[i].IP, ip)
+		}
+	}
+
+	if limited := RankHosts(hosts, 2); len(limited) != 2 {
+		t.Errorf("RankHosts limit 2 returned %d entries", len(limited))
+	}
+}

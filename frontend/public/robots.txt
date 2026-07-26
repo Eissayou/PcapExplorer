@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://pcap-explorer.whitesmoke-6fe9a4df.westus2.azurecontainerapps.io/sitemap.xml

@@ -1,15 +1,15 @@
 # Deploying PcapExplorer
 
-Target: **Azure Container Apps** — scales to zero (idle = $0), has a monthly free
+Target: **Azure Container Apps**. It scales to zero (idle = $0), has a monthly free
 grant (180,000 vCPU-seconds + 360,000 GiB-seconds + 2M requests), and gives a free
 HTTPS URL like `https://pcap-explorer.<region>.azurecontainerapps.io`. No custom
-domain required — just link that URL from your site.
+domain required, just link that URL from your site.
 
-## Option A — GitHub Actions (auto-deploy on push to `main`)
+## Option A: GitHub Actions (auto-deploy on push to `main`)
 
 The workflow at `.github/workflows/deploy.yml` builds the image in Azure's cloud
 and deploys on every push to `main`. It downloads the GeoLite2 database at build
-time (it's git-ignored — MaxMind's license forbids committing it to a public
+time (it's git-ignored, since MaxMind's license forbids committing it to a public
 repo), so nothing sensitive lives in the repo.
 
 **One-time setup:**
@@ -32,7 +32,7 @@ repo), so nothing sensitive lives in the repo.
 (Deploy to Azure Container Apps → Run workflow). The run prints your live URL at
 the end. Every later push redeploys automatically.
 
-## Option B — Manual, from your machine (one-off)
+## Option B: manual, from your machine (one-off)
 
 You already have `data/GeoLite2-City.mmdb` locally, so no license key is needed here.
 

@@ -37,7 +37,9 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/netip"
 	"runtime"
+	"sort"
 	"sync"
 
 	"github.com/google/gopacket"
@@ -73,43 +75,93 @@ type AnalysisResult struct {
 	// SentSize maps relative time (seconds from first packet) to the total bytes
 	// of packet data sent by the target IP during that second.
 	SentSize map[int]int `json:"sentSize"`
+
+	// ReceivedSize maps relative time (seconds from first packet) to the total
+	// bytes of packet data received by the target IP during that second.
+	ReceivedSize map[int]int `json:"receivedSize"`
+
+	// Hosts maps every IP address seen in the capture to the number of TCP
+	// packets it appears in, as either source or destination. It does not depend
+	// on the target IP, which is what lets a caller offer "analyze this host
+	// instead" without reparsing the file.
+	Hosts map[string]int `json:"hosts"`
 }
 
-// NewAnalysisResult creates and returns a new AnalysisResult with initialized maps.
+// partial is what a single worker accumulates during the map phase.
 //
-// This constructor ensures all internal maps are properly initialized,
-// preventing nil map panics during analysis operations.
-//
-// Returns:
-//   - *AnalysisResult: A pointer to a newly allocated result with empty maps.
-func NewAnalysisResult() *AnalysisResult {
+// It mirrors AnalysisResult, except that addresses are keyed by netip.Addr
+// rather than string. netip.Addr is a comparable value, so using it as a map key
+// costs no allocation, while net.IP.String() would allocate twice for every
+// packet in the capture. The keys are converted once, at the end of the reduce
+// phase, in finalize.
+type partial struct {
+	sentTime     map[int]int
+	receivedTime map[int]int
+	sentSize     map[int]int
+	receivedSize map[int]int
+	sentIP       map[netip.Addr]int
+	receivedIP   map[netip.Addr]int
+	hosts        map[netip.Addr]int
+}
+
+func newPartial() *partial {
+	return &partial{
+		sentTime:     make(map[int]int),
+		receivedTime: make(map[int]int),
+		sentSize:     make(map[int]int),
+		receivedSize: make(map[int]int),
+		sentIP:       make(map[netip.Addr]int),
+		receivedIP:   make(map[netip.Addr]int),
+		hosts:        make(map[netip.Addr]int),
+	}
+}
+
+// mergeCounts adds every count in src to dest. It is the one operation the
+// reduce phase performs, over each of a partial's tallies in turn.
+func mergeCounts[K comparable](dest, src map[K]int) {
+	for k, v := range src {
+		dest[k] += v
+	}
+}
+
+// merge folds another worker's tallies into p during the reduce phase.
+func (p *partial) merge(src *partial) {
+	mergeCounts(p.sentTime, src.sentTime)
+	mergeCounts(p.receivedTime, src.receivedTime)
+	mergeCounts(p.sentSize, src.sentSize)
+	mergeCounts(p.receivedSize, src.receivedSize)
+	mergeCounts(p.sentIP, src.sentIP)
+	mergeCounts(p.receivedIP, src.receivedIP)
+	mergeCounts(p.hosts, src.hosts)
+}
+
+// finalize converts the merged tallies into the public result, turning each
+// address into its string form exactly once.
+func (p *partial) finalize() *AnalysisResult {
 	return &AnalysisResult{
-		SentTime:     make(map[int]int),
-		ReceivedTime: make(map[int]int),
-		SentIP:       make(map[string]int),
-		ReceivedIP:   make(map[string]int),
-		SentSize:     make(map[int]int),
+		SentTime:     p.sentTime,
+		ReceivedTime: p.receivedTime,
+		SentSize:     p.sentSize,
+		ReceivedSize: p.receivedSize,
+		SentIP:       stringKeys(p.sentIP),
+		ReceivedIP:   stringKeys(p.receivedIP),
+		Hosts:        stringKeys(p.hosts),
 	}
 }
 
-// mergeResults merges the source AnalysisResult into the destination.
-// This is used in the reduce phase to combine partial results from workers.
-func mergeResults(dest, src *AnalysisResult) {
-	for k, v := range src.SentTime {
-		dest.SentTime[k] += v
+// stringKeys rewrites an address-keyed tally as a string-keyed one for JSON.
+func stringKeys(counts map[netip.Addr]int) map[string]int {
+	out := make(map[string]int, len(counts))
+	for addr, count := range counts {
+		out[addr.String()] += count
 	}
-	for k, v := range src.ReceivedTime {
-		dest.ReceivedTime[k] += v
-	}
-	for k, v := range src.SentIP {
-		dest.SentIP[k] += v
-	}
-	for k, v := range src.ReceivedIP {
-		dest.ReceivedIP[k] += v
-	}
-	for k, v := range src.SentSize {
-		dest.SentSize[k] += v
-	}
+	return out
+}
+
+// NewAnalysisResult returns an AnalysisResult with every map initialized, so
+// callers never have to guard against a nil map.
+func NewAnalysisResult() *AnalysisResult {
+	return newPartial().finalize()
 }
 
 // pcapngMagic is the magic byte sequence identifying PCAPNG format files.
@@ -144,38 +196,15 @@ var pcapngMagic = []byte{0x0A, 0x0D, 0x0D, 0x0A}
 // Note: For PCAPNG files, this function assumes Ethernet link type. PCAP files
 // use the link type specified in their file header.
 func Analyze(content []byte, targetIP string) (*AnalysisResult, error) {
-	reader := bytes.NewReader(content)
-
-	// Read magic bytes to determine file format
-	magic := make([]byte, 4)
-	if _, err := reader.ReadAt(magic, 0); err != nil {
-		return nil, fmt.Errorf("failed to read magic bytes: %w", err)
-	}
-
-	var packetSource *gopacket.PacketSource
-
-	// Detect file format and create appropriate reader
-	if bytes.Equal(magic, pcapngMagic) {
-		// PCAPNG format detected
-		ngReader, err := pcapgo.NewNgReader(reader, pcapgo.DefaultNgReaderOptions)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create pcapng reader: %w", err)
-		}
-		// FIXME: hardcoded to Ethernet, should read link type from interface block
-		packetSource = gopacket.NewPacketSource(ngReader, layers.LinkTypeEthernet)
-	} else {
-		// Assume PCAP format (handles both big and little endian magic)
-		pcapReader, err := pcapgo.NewReader(reader)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create pcap reader: %w", err)
-		}
-		packetSource = gopacket.NewPacketSource(pcapReader, pcapReader.LinkType())
+	packetSource, err := newPacketSource(content)
+	if err != nil {
+		return nil, err
 	}
 
 	// Parse and validate target IP address
-	targetIPNet := net.ParseIP(targetIP)
-	if targetIPNet == nil {
-		return nil, fmt.Errorf("invalid target IP: %s", targetIP)
+	target, err := parseAddr(targetIP)
+	if err != nil {
+		return nil, err
 	}
 
 	// Get packet channel from source
@@ -192,91 +221,210 @@ func Analyze(content []byte, targetIP string) (*AnalysisResult, error) {
 	// Set up worker pool (Map-Reduce pattern)
 	numWorkers := runtime.NumCPU()
 	var wg sync.WaitGroup
-	resultsChan := make(chan *AnalysisResult, numWorkers)
+	resultsChan := make(chan *partial, numWorkers)
 
 	// processPacket is the core logic each worker applies
-	processPacket := func(packet gopacket.Packet, result *AnalysisResult) {
-		srcIP, dstIP, ok := extractIPAddresses(packet)
+	processPacket := func(packet gopacket.Packet, into *partial) {
+		src, dst, ok := extractIPAddresses(packet)
 		if !ok {
 			return
 		}
 
+		// Every endpoint is tallied regardless of the target, so callers can
+		// offer the other hosts in the capture as alternatives.
+		into.hosts[src]++
+		into.hosts[dst]++
+
 		relativeTime := int(packet.Metadata().Timestamp.Sub(startTime).Seconds())
 
-		if srcIP.Equal(targetIPNet) {
-			result.SentTime[relativeTime]++
-			result.SentSize[relativeTime] += len(packet.Data())
-			result.SentIP[dstIP.String()]++
-		} else if dstIP.Equal(targetIPNet) {
-			result.ReceivedTime[relativeTime]++
-			result.ReceivedIP[srcIP.String()]++
+		switch target {
+		case src:
+			into.sentTime[relativeTime]++
+			into.sentSize[relativeTime] += len(packet.Data())
+			into.sentIP[dst]++
+		case dst:
+			into.receivedTime[relativeTime]++
+			into.receivedSize[relativeTime] += len(packet.Data())
+			into.receivedIP[src]++
 		}
 	}
 
-	// Start workers - they read directly from the packets channel
+	// Map phase: workers read directly from the packets channel, each keeping
+	// its own tallies so no lock is needed on the hot path.
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			localResult := NewAnalysisResult()
+			local := newPartial()
 
 			for packet := range packets {
-				processPacket(packet, localResult)
+				processPacket(packet, local)
 			}
 
-			resultsChan <- localResult
+			resultsChan <- local
 		}()
 	}
 
-	// Process the first packet in the main goroutine's result
+	// Process the first packet in the main goroutine's tallies
 	// (we already consumed it, so workers won't see it)
-	mainResult := NewAnalysisResult()
-	processPacket(firstPkt, mainResult)
+	merged := newPartial()
+	processPacket(firstPkt, merged)
 
 	// Wait for all workers to finish
 	wg.Wait()
 	close(resultsChan)
 
-	// Reduce phase: merge all partial results into mainResult
-	for partialResult := range resultsChan {
-		mergeResults(mainResult, partialResult)
+	// Reduce phase: fold every worker's tallies into one
+	for local := range resultsChan {
+		merged.merge(local)
 	}
 
-	return mainResult, nil
+	return merged.finalize(), nil
 }
 
-// extractIPAddresses extracts source and destination IP addresses from a TCP packet.
+// parseAddr converts a textual IP address into the comparable form the analyzer
+// keys everything on. IPv4-in-IPv6 addresses are unmapped so that "::ffff:10.0.0.1"
+// and "10.0.0.1" are treated as the same host.
+func parseAddr(ip string) (netip.Addr, error) {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("invalid target IP: %s", ip)
+	}
+	return addr.Unmap(), nil
+}
+
+// newPacketSource detects the capture format from its magic bytes and returns a
+// packet source for it. PCAPNG is identified by 0x0A0D0D0A at offset 0;
+// everything else is read as classic PCAP, which fails loudly if the bytes are
+// not a capture at all.
+func newPacketSource(content []byte) (*gopacket.PacketSource, error) {
+	reader := bytes.NewReader(content)
+
+	magic := make([]byte, 4)
+	if _, err := reader.ReadAt(magic, 0); err != nil {
+		return nil, fmt.Errorf("failed to read magic bytes: %w", err)
+	}
+
+	if bytes.Equal(magic, pcapngMagic) {
+		ngReader, err := pcapgo.NewNgReader(reader, pcapgo.DefaultNgReaderOptions)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create pcapng reader: %w", err)
+		}
+		// FIXME: hardcoded to Ethernet, should read link type from interface block
+		return gopacket.NewPacketSource(ngReader, layers.LinkTypeEthernet), nil
+	}
+
+	pcapReader, err := pcapgo.NewReader(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pcap reader: %w", err)
+	}
+	return gopacket.NewPacketSource(pcapReader, pcapReader.LinkType()), nil
+}
+
+// HostCount pairs an IP address seen in a capture with how many TCP packets it
+// took part in, in either direction.
+type HostCount struct {
+	// IP is the address of the endpoint.
+	IP string `json:"ip"`
+
+	// Packets is the number of TCP packets the address appears in as either
+	// source or destination.
+	Packets int `json:"packets"`
+}
+
+// BusiestHost returns the address that appears in the most TCP packets in the
+// capture, which is almost always the machine the capture was taken on.
 //
-// This helper function checks for both IPv4 and IPv6 layers and returns the
-// source and destination addresses. It supports mixed IPv4/IPv6 captures.
-// Only TCP packets are processed; all other protocols are filtered out.
+// It lets a caller analyze a file without the user having to know an IP address
+// up front. The capture is parsed once and everything except endpoint counts is
+// thrown away, so this is cheaper than a full Analyze.
 //
-// Parameters:
-//   - packet: The gopacket.Packet to extract addresses from.
+// Returns an empty string, and a nil error, when the capture holds no TCP
+// packets at all.
+func BusiestHost(content []byte) (string, error) {
+	packetSource, err := newPacketSource(content)
+	if err != nil {
+		return "", err
+	}
+
+	hosts := make(map[netip.Addr]int)
+	for packet := range packetSource.Packets() {
+		src, dst, ok := extractIPAddresses(packet)
+		if !ok {
+			continue
+		}
+		hosts[src]++
+		hosts[dst]++
+	}
+
+	// Only the winner is needed, so scan for it instead of sorting the lot.
+	// Ties break on the address so the answer does not change between runs.
+	var best netip.Addr
+	bestCount := 0
+	for addr, count := range hosts {
+		if count > bestCount || (count == bestCount && addr.Less(best)) {
+			best, bestCount = addr, count
+		}
+	}
+	if bestCount == 0 {
+		return "", nil
+	}
+	return best.String(), nil
+}
+
+// RankHosts sorts a host tally by packet count, descending, keeping at most
+// limit entries. Ties break on the address itself so the order is stable across
+// runs, which Go's map iteration order is not.
 //
-// Returns:
-//   - srcIP: Source IP address, or nil if not a TCP packet.
-//   - dstIP: Destination IP address, or nil if not a TCP packet.
-//   - ok: True if IP addresses were successfully extracted from a TCP packet.
-func extractIPAddresses(packet gopacket.Packet) (srcIP, dstIP net.IP, ok bool) {
+// A limit of zero or less returns every host.
+func RankHosts(hosts map[string]int, limit int) []HostCount {
+	ranked := make([]HostCount, 0, len(hosts))
+	for ip, packets := range hosts {
+		ranked = append(ranked, HostCount{IP: ip, Packets: packets})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].Packets != ranked[j].Packets {
+			return ranked[i].Packets > ranked[j].Packets
+		}
+		return ranked[i].IP < ranked[j].IP
+	})
+	if limit > 0 && len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	return ranked
+}
+
+// extractIPAddresses pulls the source and destination addresses out of a TCP
+// packet, handling IPv4 and IPv6 so mixed captures work.
+//
+// Anything that is not TCP returns ok=false and is skipped by every caller.
+// Addresses come back as netip.Addr because that type is comparable and can be
+// used as a map key without allocating.
+func extractIPAddresses(packet gopacket.Packet) (src, dst netip.Addr, ok bool) {
 	// Filter: Only process TCP packets
 	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer == nil {
-		// Not a TCP packet, skip it
-		return nil, nil, false
+		return netip.Addr{}, netip.Addr{}, false
 	}
 
 	// Try IPv4 first (more common)
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
 		ip, _ := ipLayer.(*layers.IPv4)
-		return ip.SrcIP, ip.DstIP, true
+		return toAddr(ip.SrcIP), toAddr(ip.DstIP), true
 	}
 
 	// Fall back to IPv6
 	if ipv6Layer := packet.Layer(layers.LayerTypeIPv6); ipv6Layer != nil {
 		ip, _ := ipv6Layer.(*layers.IPv6)
-		return ip.SrcIP, ip.DstIP, true
+		return toAddr(ip.SrcIP), toAddr(ip.DstIP), true
 	}
 
 	// Has TCP layer but no IP layer (shouldn't happen in practice)
-	return nil, nil, false
+	return netip.Addr{}, netip.Addr{}, false
+}
+
+// toAddr converts gopacket's net.IP into a comparable netip.Addr, unmapping the
+// IPv4-in-IPv6 form so both spellings of an IPv4 address land on one key.
+func toAddr(ip net.IP) netip.Addr {
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.Unmap()
 }
