@@ -125,10 +125,10 @@ export const LandingContent: React.FC = () => (
                             {AUTHOR.name}
                         </a>
                     </h2>
-                    <p className="mt-1 text-sm font-medium text-slate-500">Software Developer, Cloud Security and AI</p>
+                    <p className="mt-1 text-sm font-medium text-slate-500">Software Engineer at IBM watsonx.ai</p>
                     <p className="mt-4 max-w-2xl leading-relaxed text-slate-600">
-                        I&rsquo;m Jason Eissayou, a software developer working in cloud security and AI, with an MS in Computer Science and an
-                        incoming software developer role at IBM. I built PCAP Explorer because I kept opening Wireshark just to answer one
+                        I&rsquo;m Jason Eissayou, a software engineer on the watsonx.ai team at IBM, with an MS in Computer Science from UC
+                        Davis. I built PCAP Explorer because I kept opening Wireshark just to answer one
                         question, <em>who is this machine actually talking to?</em>, and I wanted that answer without scrolling a packet list.
                         The backend is Go with gopacket, the frontend is React and TypeScript, and the whole thing runs as one container on
                         Azure.
